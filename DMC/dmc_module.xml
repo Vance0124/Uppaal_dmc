@@ -1,0 +1,1352 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!DOCTYPE nta PUBLIC '-//Uppaal Team//DTD Flat System 1.1//EN' 'http://www.it.uu.se/research/group/darts/uppaal/flat-1_2.dtd'>
+<nta>
+	<declaration>// Place global declarations here.
+
+//*******************************Transaction Infor**************************************//
+const bool READ := 0;
+const bool WRITE := 1;
+
+typedef struct
+{
+int BS;
+int BC;
+bool type;
+}CmdInfo;
+
+//The maximum number of requests that are supported simultaneously
+const int MAXNrCmd= 3;
+//The request information in terms of statrting bank and BI in PARQueue
+CmdInfo CmdQueue[MAXNrCmd];
+
+//the number of transactions in the queue
+int NrCmd := 0;
+
+//The current transaction type and it is initialized with read (i.e., 0)
+bool CmdType := READ;
+
+//To indicate whether switching between read and write transactions occur.
+bool RWSW := false;
+
+//To specify the transaction/request size. It is only useful for a system
+//with fixed transaction size, where the TDM TA template is not used.
+int CmdSize := 32;
+
+//The total number of requestors supported by the memory controller.
+const int MaxReqNr :=3;
+
+//*******************************Command Infor**************************************//
+//The total number of banks
+const int BANK = 8;
+
+//assume that the first bank for ACT is Bank 0
+int ACTBank := 0;
+//assume that the first bank for RD or WR is Bank 0
+int RWBank := 0;
+
+bool RASAT[BANK] := {false, false, false, false, false, false, false, false};
+
+//*******************************Channel Infor**************************************//
+urgent chan Cmd;
+urgent chan NextCmd;
+urgent chan TDMArb;
+urgent chan AddrMap;
+
+//the channel for resetting the ACT relevant timing counters
+urgent broadcast chan ACTCmd;
+
+//The channel for reseting the RD or WR related timing counters.
+urgent broadcast chan RWCmd;
+
+//The channel for reseting the RD or WR related timing counters.
+urgent broadcast chan ValidRCD;
+
+//the channel to send ACT command to the CMD bus
+urgent chan ACTBus;
+
+//the channel to indicate the valid tRP timing counters
+urgent chan ValidRP[BANK];
+
+//the channel to indicate the valid RRD constraint
+urgent chan ValidRRD;
+
+//the channel to indicate the valid tCCD constraint between two RD or WR commands
+urgent chan ValidCCD;
+
+//the channel to provide valid RD and WR swtiching constraint
+urgent broadcast chan ValidSwitch;
+
+//The channel to indicate the valid RAS constraint
+//urgent chan ValidRAS[BANK];
+urgent broadcast chan ValidRAS[BANK];
+
+//The channel to indicate the valid RCD constraint
+//urgent chan ValidRCD;
+
+//The channel to indicate the valid RTP constraint
+urgent chan ValidRWTP[BANK];
+
+//Channels for FAW constraint
+urgent chan ValidFAW[4];
+
+//The channel to trigger the collection of WCET
+urgent chan CmdEnd;
+
+//The channel to trigger the collection of WCRT per requestor
+urgent chan ReqEnd;
+//*******************************Clock Infor**************************************//
+//system clock. It is only used for simulation.
+clock clk;
+//************************************End*****************************************//
+
+//*********************************Global Variables**********************************//
+
+//The current transaction type, where the RD or WR commands are scheduling. 
+bool CurrType;
+//The current transaction size
+int CurrSize := 0;
+
+//The variable to initialize the timing constraint counters when they are reset.
+int InitCount := 0;
+
+//To indicate the last RD or WR command of a transaction.
+bool LRWCmd := false;
+//The RW switch counter is done, indicating switching constraint is satisfied.
+bool SWSAT := false;
+
+//To track the RCD timing counters.
+int NextRCD := 0;
+
+//The number of satisfied RCD timing constraints.
+int RCDSATNr := 0;
+
+//The FAW counter ID that is currently used.
+int FAWID := -1;
+
+//The burst count per bank
+int BCIndex := 1;
+//************************************End*****************************************//
+
+//*********************************MemSpec DDR3-1600******************************//
+//For other DDR3 devices, we only need to replace the following timing constraint
+//values. While for other DDR devices, e.g., LPDDR3, these variables must be configured
+//to represent the minimum timing interval between any two commands.
+const int V_RRD := 6;
+const int V_FAW := 32;
+const int V_RCD := 8;
+const int V_RAS := 28;
+const int V_CCD := 4;
+const int V_RTP := 6;
+const int V_RTW := 6;
+const int V_WTR := 18;
+const int V_RP := 8;
+const int V_WTP := 24;
+//************************************End*****************************************//</declaration>
+	<template>
+		<name x="5" y="5">Source</name>
+		<declaration>//This Source TA template captures the behavior of randomly producing memory
+//transactions, either read or write. Note that it only pushes the memory controller
+//busy, i.e., there is always a trnasaction when the back-end of the memory controller
+//ask a new transaction by synchronizing via NextTrans channel.</declaration>
+		<location id="id0" x="-840" y="-360">
+			<name x="-872" y="-392">Src</name>
+			<committed/>
+		</location>
+		<location id="id1" x="-680" y="-360">
+			<name x="-697" y="-391">Sink</name>
+		</location>
+		<init ref="id0"/>
+		<transition>
+			<source ref="id0"/>
+			<target ref="id1"/>
+			<label kind="synchronisation" x="-792" y="-376">Cmd!</label>
+			<label kind="assignment" x="-824" y="-357">CmdType := READ</label>
+		</transition>
+		<transition>
+			<source ref="id0"/>
+			<target ref="id1"/>
+			<label kind="synchronisation" x="-792" y="-328">Cmd!</label>
+			<label kind="assignment" x="-824" y="-312">CmdType := WRITE</label>
+			<nail x="-840" y="-312"/>
+			<nail x="-680" y="-312"/>
+		</transition>
+		<transition>
+			<source ref="id1"/>
+			<target ref="id0"/>
+			<label kind="synchronisation" x="-808" y="-415">NextCmd?</label>
+			<nail x="-680" y="-399"/>
+			<nail x="-840" y="-399"/>
+		</transition>
+	</template>
+	<template>
+		<name>RCD</name>
+		<parameter>int id</parameter>
+		<declaration>
+//The clock to track the tRCD timing constraints.
+clock tRCD;</declaration>
+		<location id="id2" x="-807" y="-221">
+			<committed/>
+		</location>
+		<location id="id3" x="-663" y="-280">
+			<name x="-678" y="-306">RCD</name>
+			<label kind="invariant" x="-756" y="-323">tRCD &lt;= V_RCD</label>
+		</location>
+		<location id="id4" x="-892" y="-280">
+			<name x="-902" y="-310">Idle</name>
+		</location>
+		<init ref="id4"/>
+		<transition>
+			<source ref="id2"/>
+			<target ref="id4"/>
+			<label kind="synchronisation" x="-884" y="-238">ValidRCD!</label>
+			<nail x="-892" y="-221"/>
+		</transition>
+		<transition>
+			<source ref="id3"/>
+			<target ref="id2"/>
+			<label kind="guard" x="-790" y="-238">tRCD == V_RCD</label>
+			<label kind="assignment" x="-782" y="-221">RCDSATNr++</label>
+			<nail x="-663" y="-221"/>
+		</transition>
+		<transition>
+			<source ref="id4"/>
+			<target ref="id3"/>
+			<label kind="guard" x="-875" y="-297">NextRCD == id</label>
+			<label kind="synchronisation" x="-756" y="-297">ACTCmd?</label>
+			<label kind="assignment" x="-875" y="-280">tRCD := InitCount,
+NextRCD := (NextRCD+1)%2</label>
+		</transition>
+	</template>
+	<template>
+		<name>FAW</name>
+		<parameter>int id</parameter>
+		<declaration>//the FAW constraint tracked per bank
+clock tClk;
+
+//The bank id that an ACT command has been scheduled.
+int BankID;</declaration>
+		<location id="id5" x="-1304" y="-1408">
+			<name x="-1320" y="-1440">SAT0</name>
+			<committed/>
+		</location>
+		<location id="id6" x="-1304" y="-1544">
+			<name x="-1317" y="-1572">RAS</name>
+			<label kind="invariant" x="-1394" y="-1589">tClk &lt;= V_RAS</label>
+		</location>
+		<location id="id7" x="-1496" y="-1464">
+			<name x="-1512" y="-1496">SAT1</name>
+		</location>
+		<location id="id8" x="-1496" y="-1408">
+			<name x="-1513" y="-1436">FAW</name>
+			<label kind="invariant" x="-1513" y="-1394">tClk &lt;= V_FAW</label>
+		</location>
+		<location id="id9" x="-1496" y="-1544">
+			<name x="-1506" y="-1574">Idle</name>
+		</location>
+		<init ref="id7"/>
+		<transition>
+			<source ref="id5"/>
+			<target ref="id8"/>
+			<label kind="synchronisation" x="-1462" y="-1428">ValidRAS[BankID]!</label>
+		</transition>
+		<transition>
+			<source ref="id6"/>
+			<target ref="id5"/>
+			<label kind="guard" x="-1411" y="-1496">tClk == V_RAS</label>
+			<label kind="assignment" x="-1470" y="-1479">RASAT[BankID] := true</label>
+		</transition>
+		<transition>
+			<source ref="id7"/>
+			<target ref="id9"/>
+			<label kind="synchronisation" x="-1496" y="-1513">ValidFAW[id]!</label>
+		</transition>
+		<transition>
+			<source ref="id8"/>
+			<target ref="id7"/>
+			<label kind="guard" x="-1488" y="-1448">tClk == V_FAW</label>
+		</transition>
+		<transition>
+			<source ref="id9"/>
+			<target ref="id6"/>
+			<label kind="guard" x="-1480" y="-1560">FAWID == id</label>
+			<label kind="synchronisation" x="-1384" y="-1560">ACTCmd?</label>
+			<label kind="assignment" x="-1480" y="-1544">tClk := InitCount,
+BankID := ACTBank</label>
+		</transition>
+	</template>
+	<template>
+		<name>RRD</name>
+		<declaration>
+//The clock to track the tRRD timing constraint.
+clock tRRD;</declaration>
+		<location id="id10" x="-1027" y="-557">
+			<name x="-1037" y="-591">SAT</name>
+		</location>
+		<location id="id11" x="-875" y="-637">
+			<name x="-896" y="-663">RRD</name>
+			<label kind="invariant" x="-981" y="-680">tRRD &lt;= V_RRD</label>
+		</location>
+		<location id="id12" x="-1027" y="-637">
+			<name x="-1037" y="-667">Idle</name>
+		</location>
+		<init ref="id10"/>
+		<transition>
+			<source ref="id10"/>
+			<target ref="id12"/>
+			<label kind="synchronisation" x="-1023" y="-612">ValidRRD!</label>
+		</transition>
+		<transition>
+			<source ref="id11"/>
+			<target ref="id10"/>
+			<label kind="guard" x="-998" y="-578">tRRD == V_RRD</label>
+			<nail x="-875" y="-621"/>
+			<nail x="-875" y="-557"/>
+		</transition>
+		<transition>
+			<source ref="id12"/>
+			<target ref="id11"/>
+			<label kind="synchronisation" x="-989" y="-655">ACTCmd?</label>
+			<label kind="assignment" x="-1011" y="-637">tRRD := InitCount</label>
+		</transition>
+	</template>
+	<template>
+		<name>CCD</name>
+		<declaration>//this clock tracks the tCCD constraint between two RD or two WR commands.
+clock tCCD;</declaration>
+		<location id="id13" x="-1359" y="-1041">
+			<name x="-1368" y="-1071">SAT</name>
+			<urgent/>
+		</location>
+		<location id="id14" x="-1207" y="-1113">
+			<name x="-1224" y="-1139">CCD</name>
+			<label kind="invariant" x="-1309" y="-1156">tCCD &lt;= V_CCD</label>
+		</location>
+		<location id="id15" x="-1359" y="-1113">
+			<name x="-1369" y="-1143">Idle</name>
+		</location>
+		<init ref="id13"/>
+		<transition>
+			<source ref="id15"/>
+			<target ref="id14"/>
+			<label kind="synchronisation" x="-1319" y="-1129">RWCmd?</label>
+			<label kind="assignment" x="-1319" y="-1113">tCCD := 0</label>
+		</transition>
+		<transition>
+			<source ref="id13"/>
+			<target ref="id15"/>
+			<label kind="synchronisation" x="-1359" y="-1089">ValidCCD!</label>
+		</transition>
+		<transition>
+			<source ref="id14"/>
+			<target ref="id13"/>
+			<label kind="guard" x="-1319" y="-1065">tCCD == V_CCD</label>
+			<nail x="-1207" y="-1041"/>
+		</transition>
+	</template>
+	<template>
+		<name>MemMap</name>
+		<declaration>//This MemMap template encodes the mapping of a trnasaction to BI banks according to its size.
+//Note that the encoded BI and BC for each transaction size give the lowest execution time. They
+//can be configured in a trade-off between execution time, bandwidth, and power.
+
+//BI is the bank interleaving number. It is the number of banks that a transaction interleaves over.
+//BC is the burst count per bank. It specifies the number of RD or WR commands of a bank, which trigger
+//BC data bursts. A data burst is 8 words for DDR3 SDRAM.
+int BC, BS;
+
+//The position in PARQueue for the next transaction
+int id := 0;
+
+//This Info is an element to collect the BI, BC, BS, and type of a trnasaction.
+CmdInfo Info;
+
+//We assume 16 bytes requests only use bank 0 or bank 1. This can cover the worst-case
+//scenario, though these transactions can use any of the 8 banks. With this assumption, the
+//UPPAAL verifier runs much faster and can finish without sufferring the out-of-memory issue.
+
+</declaration>
+		<location id="id16" x="-943" y="-621">
+			<name x="-960" y="-655">BIBC</name>
+			<committed/>
+		</location>
+		<location id="id17" x="-790" y="-621">
+			<committed/>
+		</location>
+		<location id="id18" x="-637" y="-621">
+			<name x="-647" y="-655">End</name>
+			<committed/>
+		</location>
+		<location id="id19" x="-1028" y="-621">
+			<name x="-1038" y="-651">Idle</name>
+		</location>
+		<init ref="id19"/>
+		<transition>
+			<source ref="id17"/>
+			<target ref="id18"/>
+			<label kind="guard" x="-765" y="-586">BC&lt;=2</label>
+			<label kind="assignment" x="-714" y="-586">BS := 6</label>
+			<nail x="-773" y="-569"/>
+			<nail x="-654" y="-569"/>
+		</transition>
+		<transition>
+			<source ref="id17"/>
+			<target ref="id18"/>
+			<label kind="guard" x="-765" y="-688">BC&lt;=2</label>
+			<label kind="assignment" x="-714" y="-688">BS := 2</label>
+			<nail x="-765" y="-671"/>
+			<nail x="-663" y="-671"/>
+		</transition>
+		<transition>
+			<source ref="id17"/>
+			<target ref="id18"/>
+			<label kind="assignment" x="-714" y="-637">BS := 4</label>
+		</transition>
+		<transition>
+			<source ref="id17"/>
+			<target ref="id18"/>
+			<label kind="assignment" x="-714" y="-739">BS :=0</label>
+			<nail x="-790" y="-713"/>
+			<nail x="-646" y="-713"/>
+		</transition>
+		<transition>
+			<source ref="id17"/>
+			<target ref="id18"/>
+			<label kind="guard" x="-765" y="-663">BC==1</label>
+			<label kind="assignment" x="-713" y="-663">BS := 3</label>
+			<nail x="-764" y="-646"/>
+			<nail x="-662" y="-646"/>
+		</transition>
+		<transition>
+			<source ref="id17"/>
+			<target ref="id18"/>
+			<label kind="guard" x="-765" y="-561">BC==1</label>
+			<label kind="assignment" x="-713" y="-561">BS := 7</label>
+			<nail x="-781" y="-544"/>
+			<nail x="-645" y="-544"/>
+		</transition>
+		<transition>
+			<source ref="id17"/>
+			<target ref="id18"/>
+			<label kind="guard" x="-765" y="-612">BC==1</label>
+			<label kind="assignment" x="-713" y="-612">BS := 5</label>
+			<nail x="-773" y="-595"/>
+			<nail x="-654" y="-595"/>
+		</transition>
+		<transition>
+			<source ref="id16"/>
+			<target ref="id17"/>
+			<label kind="guard" x="-926" y="-706">CmdSize == 64</label>
+			<label kind="assignment" x="-926" y="-689">BC := 4</label>
+			<nail x="-943" y="-689"/>
+			<nail x="-807" y="-689"/>
+		</transition>
+		<transition>
+			<source ref="id16"/>
+			<target ref="id17"/>
+			<label kind="guard" x="-926" y="-672">CmdSize == 32</label>
+			<label kind="assignment" x="-926" y="-655">BC := 2</label>
+			<nail x="-934" y="-655"/>
+			<nail x="-815" y="-655"/>
+		</transition>
+		<transition>
+			<source ref="id17"/>
+			<target ref="id18"/>
+			<label kind="guard" x="-765" y="-714">BC==1</label>
+			<label kind="assignment" x="-714" y="-706">BS := 1</label>
+			<nail x="-782" y="-689"/>
+			<nail x="-654" y="-689"/>
+		</transition>
+		<transition>
+			<source ref="id16"/>
+			<target ref="id17"/>
+			<label kind="guard" x="-926" y="-638">CmdSize == 16</label>
+			<label kind="assignment" x="-926" y="-621">BC := 1</label>
+		</transition>
+		<transition>
+			<source ref="id19"/>
+			<target ref="id16"/>
+			<label kind="synchronisation" x="-1019" y="-638">TDMArb?</label>
+		</transition>
+		<transition>
+			<source ref="id18"/>
+			<target ref="id19"/>
+			<label kind="synchronisation" x="-1019" y="-544">AddrMap!</label>
+			<label kind="assignment" x="-1019" y="-527">Info.BS := BS, Info.BC := BC,
+CmdQueue[id] := Info, id := (id+1)%MAXNrCmd,
+Info.type := CmdType, NrCmd++</label>
+			<nail x="-637" y="-527"/>
+			<nail x="-1028" y="-527"/>
+		</transition>
+	</template>
+	<template>
+		<name>ActScheduler</name>
+		<declaration>
+//This template implements the scheduling of ACT commands to each bank.
+//Note that a transaction interleaves over BI consecutive banks.
+
+int id := 0;
+int BI;
+//The current bank id that must be scheduled an ACT command.
+int CurrBank := 0;
+
+</declaration>
+		<location id="id20" x="59" y="17">
+			<name x="17" y="-17">CmdBus</name>
+			<committed/>
+		</location>
+		<location id="id21" x="212" y="17">
+			<name x="204" y="-8">RP</name>
+		</location>
+		<location id="id22" x="212" y="-42">
+			<name x="161" y="-51">FAW</name>
+		</location>
+		<location id="id23" x="-17" y="-25">
+			<name x="0" y="-33">ACT</name>
+		</location>
+		<location id="id24" x="212" y="-102">
+			<name x="229" y="-110">RRD</name>
+		</location>
+		<location id="id25" x="-17" y="-102">
+			<name x="-35" y="-126">Fork</name>
+			<committed/>
+		</location>
+		<location id="id26" x="212" y="-195">
+			<name x="170" y="-212">Idle</name>
+		</location>
+		<init ref="id26"/>
+		<transition>
+			<source ref="id20"/>
+			<target ref="id23"/>
+			<label kind="synchronisation" x="-17" y="0">ACTBus!</label>
+			<nail x="-17" y="17"/>
+		</transition>
+		<transition>
+			<source ref="id21"/>
+			<target ref="id20"/>
+			<label kind="synchronisation" x="68" y="0">ValidRP[ACTBank]?</label>
+		</transition>
+		<transition>
+			<source ref="id22"/>
+			<target ref="id21"/>
+			<label kind="synchronisation" x="76" y="-25">ValidFAW[FAWID]?</label>
+		</transition>
+		<transition>
+			<source ref="id24"/>
+			<target ref="id22"/>
+			<label kind="synchronisation" x="136" y="-68">ValidRRD?</label>
+		</transition>
+		<transition>
+			<source ref="id23"/>
+			<target ref="id25"/>
+			<label kind="synchronisation" x="-8" y="-68">ACTCmd?</label>
+			<label kind="assignment" x="-8" y="-52">CurrBank++</label>
+		</transition>
+		<transition>
+			<source ref="id25"/>
+			<target ref="id26"/>
+			<label kind="guard" x="51" y="-144">BI == 0</label>
+			<label kind="synchronisation" x="111" y="-144">NextCmd!</label>
+			<nail x="17" y="-127"/>
+			<nail x="212" y="-127"/>
+		</transition>
+		<transition>
+			<source ref="id25"/>
+			<target ref="id24"/>
+			<label kind="guard" x="68" y="-119">BI &gt; 0</label>
+			<label kind="assignment" x="0" y="-102">BI--, ACTBank := CurrBank,
+FAWID := (FAWID+1)%4</label>
+		</transition>
+		<transition>
+			<source ref="id26"/>
+			<target ref="id25"/>
+			<label kind="synchronisation" x="25" y="-212">AddrMap?</label>
+			<label kind="assignment" x="-8" y="-195">BI := 1,
+CurrBank := CmdQueue[id].BS,
+id := (id+1) % MAXNrCmd</label>
+			<nail x="-17" y="-195"/>
+		</transition>
+	</template>
+	<template>
+		<name>RwScheduler</name>
+		<declaration>//This template implements the scheduling of RD or WR commands.
+//Each bank is scheduled BC RD/WR commands.
+
+int id := 0;
+int BI;
+int BC;
+int BS;
+int preBS := 0;
+bool preType := READ;
+int ReqID := 0;
+int CurrBank := 0;
+bool firstTrans := true;
+int preSize := 0;
+
+//bool TFinish := false;
+
+
+//This function checks whether it is a switch from a read to a write, and vice versa.
+void RWSwitch()
+{
+  if(firstTrans)
+  {
+   RWSW := false;
+   firstTrans := false;
+  }
+  else if(preType != CurrType)
+  {
+   RWSW := true;
+  }
+}
+
+//This function checks whether the last RD or WR command of a transaction is scheduled.
+void LastBank()
+{
+  if(BI == 0)
+  {
+    LRWCmd := true;
+  }
+}
+
+</declaration>
+		<location id="id27" x="459" y="229">
+		</location>
+		<location id="id28" x="178" y="178">
+			<name x="168" y="148">CCD</name>
+		</location>
+		<location id="id29" x="459" y="187">
+			<name x="476" y="178">Switch</name>
+			<committed/>
+		</location>
+		<location id="id30" x="323" y="136">
+			<name x="314" y="110">RW</name>
+			<committed/>
+		</location>
+		<location id="id31" x="459" y="59">
+			<name x="400" y="42">RCDW</name>
+		</location>
+		<location id="id32" x="459" y="136">
+			<name x="450" y="110">SW</name>
+			<committed/>
+		</location>
+		<location id="id33" x="459" y="8">
+			<name x="449" y="-22">RCD</name>
+			<committed/>
+		</location>
+		<location id="id34" x="178" y="136">
+			<name x="161" y="110">REnd</name>
+			<committed/>
+		</location>
+		<location id="id35" x="344" y="8">
+			<name x="324" y="-24">CCD0</name>
+		</location>
+		<location id="id36" x="153" y="8">
+			<name x="137" y="-24">Fork</name>
+			<committed/>
+		</location>
+		<location id="id37" x="-93" y="8">
+			<name x="-103" y="-22">Idle</name>
+		</location>
+		<init ref="id37"/>
+		<transition>
+			<source ref="id29"/>
+			<target ref="id27"/>
+			<label kind="guard" x="467" y="204">!SWSAT</label>
+		</transition>
+		<transition>
+			<source ref="id29"/>
+			<target ref="id30"/>
+			<label kind="guard" x="348" y="153">SWSAT</label>
+			<label kind="assignment" x="331" y="170">SWSAT := false,
+BCIndex--</label>
+			<nail x="434" y="170"/>
+			<nail x="348" y="170"/>
+		</transition>
+		<transition>
+			<source ref="id30"/>
+			<target ref="id34"/>
+			<label kind="guard" x="204" y="119">BCIndex == 0</label>
+			<label kind="assignment" x="212" y="136">LastBank()</label>
+		</transition>
+		<transition>
+			<source ref="id28"/>
+			<target ref="id30"/>
+			<label kind="synchronisation" x="195" y="161">ValidCCD?</label>
+			<nail x="280" y="178"/>
+		</transition>
+		<transition>
+			<source ref="id30"/>
+			<target ref="id28"/>
+			<label kind="guard" x="187" y="195">BCIndex &gt; 0</label>
+			<label kind="synchronisation" x="187" y="212">RWCmd!</label>
+			<label kind="assignment" x="186" y="229">BCIndex--</label>
+			<nail x="306" y="178"/>
+			<nail x="306" y="229"/>
+			<nail x="178" y="229"/>
+		</transition>
+		<transition>
+			<source ref="id27"/>
+			<target ref="id30"/>
+			<label kind="synchronisation" x="331" y="212">ValidSwitch?</label>
+			<label kind="assignment" x="334" y="230">BCIndex--,
+SWSAT := false</label>
+			<nail x="323" y="229"/>
+		</transition>
+		<transition>
+			<source ref="id32"/>
+			<target ref="id29"/>
+			<label kind="guard" x="468" y="160">RWSW</label>
+			<label kind="assignment" x="468" y="144">RWSW := false</label>
+		</transition>
+		<transition>
+			<source ref="id32"/>
+			<target ref="id30"/>
+			<label kind="guard" x="374" y="119">!RWSW</label>
+			<label kind="assignment" x="375" y="136">BCIndex--</label>
+		</transition>
+		<transition>
+			<source ref="id33"/>
+			<target ref="id31"/>
+			<label kind="guard" x="340" y="25">RCDSATNr == 0</label>
+		</transition>
+		<transition>
+			<source ref="id33"/>
+			<target ref="id32"/>
+			<label kind="guard" x="493" y="51">RCDSATNr &gt; 0</label>
+			<label kind="assignment" x="493" y="68">RCDSATNr--</label>
+			<nail x="485" y="34"/>
+			<nail x="485" y="110"/>
+		</transition>
+		<transition>
+			<source ref="id31"/>
+			<target ref="id32"/>
+			<label kind="synchronisation" x="391" y="76">ValidRCD?</label>
+			<label kind="assignment" x="374" y="93">RCDSATNr--</label>
+		</transition>
+		<transition>
+			<source ref="id35"/>
+			<target ref="id33"/>
+			<label kind="synchronisation" x="368" y="-8">ValidCCD?</label>
+		</transition>
+		<transition>
+			<source ref="id36"/>
+			<target ref="id37"/>
+			<label kind="guard" x="-51" y="178">BI == 0</label>
+			<label kind="synchronisation" x="25" y="178">CmdEnd!</label>
+			<label kind="assignment" x="-85" y="195">NrCmd--, preSize := CurrSize,
+preBS := BS, preType := CurrType,
+ReqID := (ReqID+1)%MaxReqNr</label>
+			<nail x="153" y="195"/>
+			<nail x="-93" y="195"/>
+		</transition>
+		<transition>
+			<source ref="id34"/>
+			<target ref="id36"/>
+			<label kind="synchronisation" x="187" y="69">RWCmd!</label>
+			<label kind="assignment" x="187" y="85">CurrBank++</label>
+			<nail x="178" y="68"/>
+		</transition>
+		<transition>
+			<source ref="id36"/>
+			<target ref="id35"/>
+			<label kind="guard" x="224" y="-8">BI &gt; 0</label>
+			<label kind="assignment" x="184" y="8">BI--, BCIndex := BC,
+RWBank := CurrBank,
+LRWCmd := false</label>
+		</transition>
+		<transition>
+			<source ref="id37"/>
+			<target ref="id36"/>
+			<label kind="guard" x="-16" y="-8">NrCmd &gt; 0</label>
+			<label kind="assignment" x="-76" y="8">CurrBank := CmdQueue[id].BS,
+BI := 1,
+BC := CmdQueue[id].BC,
+BS := CmdQueue[id].BS,
+CurrType := CmdQueue[id].type,
+id := (id+1) % MAXNrCmd,
+CurrSize := BC*16,
+RWSwitch()</label>
+		</transition>
+	</template>
+	<template>
+		<name>TDM</name>
+		<declaration>//This template only implements that each requestor has one TDM slot,
+//which is equivalent to a round robin arbiter. Moreover, according to
+//the number of requestors and the number of allocated slots, this template
+//should be modified properly.
+
+//The initial requestor to be scheduled is Requestor 0
+int Requestor := 0;
+
+</declaration>
+		<location id="id38" x="-382" y="-178">
+			<name x="-382" y="-210">End</name>
+			<committed/>
+		</location>
+		<location id="id39" x="-552" y="-178">
+			<name x="-584" y="-210">TDM</name>
+			<committed/>
+		</location>
+		<location id="id40" x="-637" y="-178">
+			<name x="-647" y="-208">Idle</name>
+		</location>
+		<init ref="id40"/>
+		<transition>
+			<source ref="id39"/>
+			<target ref="id38"/>
+			<label kind="guard" x="-527" y="-263">Requestor == 0</label>
+			<label kind="assignment" x="-527" y="-246">CmdSize := 64</label>
+			<nail x="-535" y="-246"/>
+			<nail x="-399" y="-246"/>
+		</transition>
+		<transition>
+			<source ref="id39"/>
+			<target ref="id38"/>
+			<label kind="guard" x="-527" y="-229">Requestor == 1</label>
+			<label kind="assignment" x="-527" y="-212">CmdSize := 32</label>
+			<nail x="-535" y="-212"/>
+			<nail x="-407" y="-212"/>
+		</transition>
+		<transition>
+			<source ref="id39"/>
+			<target ref="id38"/>
+			<label kind="guard" x="-527" y="-195">Requestor == 2</label>
+			<label kind="assignment" x="-527" y="-178">CmdSize := 16</label>
+		</transition>
+		<transition>
+			<source ref="id38"/>
+			<target ref="id40"/>
+			<label kind="synchronisation" x="-623" y="-101">TDMArb!</label>
+			<label kind="assignment" x="-654" y="-85">Requestor := (Requestor +1)%MaxReqNr</label>
+			<nail x="-382" y="-85"/>
+			<nail x="-637" y="-85"/>
+		</transition>
+		<transition>
+			<source ref="id40"/>
+			<target ref="id39"/>
+			<label kind="synchronisation" x="-620" y="-195">Cmd?</label>
+		</transition>
+	</template>
+	<template>
+		<name>CmdBus</name>
+		<declaration>//The main rule of this command bus is to detect and solve the collision
+//between an ACT command and a RD/WR command.
+
+clock tDelay;
+
+bool C1RW := false;
+bool C1ACT := false;
+bool C2ACT := false;</declaration>
+		<location id="id41" x="-25" y="-25">
+			<committed/>
+		</location>
+		<location id="id42" x="-25" y="-68">
+			<committed/>
+		</location>
+		<location id="id43" x="263" y="51">
+			<name x="247" y="11">ACT</name>
+			<committed/>
+		</location>
+		<location id="id44" x="263" y="-59">
+			<name x="253" y="-89">Coli</name>
+			<label kind="invariant" x="207" y="-107">tDelay &lt;= 1</label>
+		</location>
+		<location id="id45" x="110" y="-59">
+			<committed/>
+		</location>
+		<location id="id46" x="-25" y="42">
+			<name x="-33" y="58">RWACT</name>
+			<label kind="invariant" x="-33" y="74">tDelay &lt;= 1</label>
+		</location>
+		<location id="id47" x="-25" y="-127">
+			<name x="-49" y="-159">ACTRW</name>
+			<label kind="invariant" x="-57" y="-175">tDelay &lt;= 1</label>
+		</location>
+		<location id="id48" x="-144" y="-34">
+			<name x="-136" y="-58">Idle</name>
+		</location>
+		<init ref="id48"/>
+		<transition>
+			<source ref="id45"/>
+			<target ref="id43"/>
+			<label kind="guard" x="127" y="-8">!C1ACT &amp;&amp; C2ACT</label>
+			<label kind="assignment" x="136" y="8">InitCount := 0</label>
+			<nail x="126" y="8"/>
+			<nail x="238" y="8"/>
+		</transition>
+		<transition>
+			<source ref="id41"/>
+			<target ref="id45"/>
+			<label kind="guard" x="0" y="-42">tDelay == 1</label>
+			<nail x="85" y="-25"/>
+		</transition>
+		<transition>
+			<source ref="id46"/>
+			<target ref="id41"/>
+			<label kind="synchronisation" x="-85" y="-8">ACTBus?</label>
+			<label kind="assignment" x="-128" y="8">C2ACT := true</label>
+		</transition>
+		<transition>
+			<source ref="id42"/>
+			<target ref="id45"/>
+			<label kind="guard" x="-1" y="-68">tDelay == 1</label>
+			<nail x="-8" y="-51"/>
+			<nail x="76" y="-51"/>
+		</transition>
+		<transition>
+			<source ref="id47"/>
+			<target ref="id42"/>
+			<label kind="synchronisation" x="-25" y="-116">RWCmd?</label>
+		</transition>
+		<transition>
+			<source ref="id45"/>
+			<target ref="id48"/>
+			<label kind="guard" x="-144" y="-195">C1RW &amp;&amp; !C2ACT</label>
+			<nail x="127" y="-102"/>
+			<nail x="127" y="-178"/>
+			<nail x="-153" y="-178"/>
+			<nail x="-153" y="-59"/>
+		</transition>
+		<transition>
+			<source ref="id45"/>
+			<target ref="id43"/>
+			<label kind="guard" x="119" y="34">C1ACT &amp;&amp; !C1RW</label>
+			<label kind="assignment" x="126" y="53">InitCount := 1</label>
+			<nail x="119" y="51"/>
+		</transition>
+		<transition>
+			<source ref="id43"/>
+			<target ref="id48"/>
+			<label kind="synchronisation" x="93" y="85">ACTCmd!</label>
+			<nail x="263" y="102"/>
+			<nail x="-153" y="102"/>
+			<nail x="-153" y="-8"/>
+		</transition>
+		<transition>
+			<source ref="id44"/>
+			<target ref="id43"/>
+			<label kind="guard" x="170" y="-42">tDelay == 1</label>
+			<label kind="assignment" x="162" y="-26">InitCount := 0</label>
+		</transition>
+		<transition>
+			<source ref="id45"/>
+			<target ref="id44"/>
+			<label kind="guard" x="126" y="-75">C1RW &amp;&amp; C1ACT</label>
+			<label kind="assignment" x="126" y="-59">tDelay := 0</label>
+		</transition>
+		<transition>
+			<source ref="id41"/>
+			<target ref="id45"/>
+			<label kind="guard" x="0" y="-17">tDelay &lt; 1</label>
+			<label kind="assignment" x="-1" y="-1">C1ACT := true</label>
+			<nail x="0" y="0"/>
+			<nail x="93" y="0"/>
+		</transition>
+		<transition>
+			<source ref="id42"/>
+			<target ref="id45"/>
+			<label kind="guard" x="-1" y="-100">tDelay &lt; 1</label>
+			<label kind="assignment" x="-1" y="-84">C1RW := true</label>
+			<nail x="-8" y="-85"/>
+			<nail x="93" y="-85"/>
+		</transition>
+		<transition>
+			<source ref="id47"/>
+			<target ref="id45"/>
+			<label kind="guard" x="0" y="-144">tDelay == 1</label>
+			<nail x="110" y="-127"/>
+		</transition>
+		<transition>
+			<source ref="id46"/>
+			<target ref="id45"/>
+			<label kind="guard" x="-1" y="28">tDelay == 1</label>
+			<label kind="assignment" x="-1" y="44">C2ACT := false</label>
+			<nail x="102" y="42"/>
+		</transition>
+		<transition>
+			<source ref="id48"/>
+			<target ref="id46"/>
+			<label kind="synchronisation" x="-136" y="25">RWCmd?</label>
+			<label kind="assignment" x="-144" y="42">tDelay := 0,
+C1RW := true,
+C1ACT := false</label>
+			<nail x="-144" y="42"/>
+		</transition>
+		<transition>
+			<source ref="id48"/>
+			<target ref="id47"/>
+			<label kind="synchronisation" x="-127" y="-144">ACTBus?</label>
+			<label kind="assignment" x="-144" y="-127">tDelay := 0,
+C1RW := false,
+C1ACT := true,
+C2ACT := true</label>
+			<nail x="-144" y="-127"/>
+		</transition>
+	</template>
+	<template>
+		<name>SWCounter</name>
+		<declaration>//This template is the counter of tracking the switching timing
+//constraints between read and write transaction.
+
+clock tRW;</declaration>
+		<location id="id49" x="-328" y="-264">
+			<committed/>
+		</location>
+		<location id="id50" x="-504" y="-160">
+			<name x="-528" y="-192">EndWTR</name>
+			<committed/>
+		</location>
+		<location id="id51" x="-504" y="-360">
+			<name x="-536" y="-392">EndRTW</name>
+			<committed/>
+		</location>
+		<location id="id52" x="-328" y="-160">
+			<name x="-368" y="-192">WTR</name>
+			<label kind="invariant" x="-365" y="-153">tRW &lt;= V_WTR</label>
+		</location>
+		<location id="id53" x="-328" y="-360">
+			<name x="-368" y="-352">RTW</name>
+			<label kind="invariant" x="-374" y="-391">tRW &lt;= V_RTW</label>
+		</location>
+		<location id="id54" x="-504" y="-264">
+			<name x="-536" y="-288">Idle</name>
+		</location>
+		<init ref="id54"/>
+		<transition>
+			<source ref="id53"/>
+			<target ref="id49"/>
+			<label kind="guard" x="-399" y="-340">LRWCmd</label>
+			<label kind="synchronisation" x="-399" y="-324">RWCmd?</label>
+			<label kind="assignment" x="-442" y="-306">SWSAT := false</label>
+		</transition>
+		<transition>
+			<source ref="id54"/>
+			<target ref="id49"/>
+			<label kind="guard" x="-488" y="-280">LRWCmd</label>
+			<label kind="synchronisation" x="-416" y="-280">RWCmd?</label>
+			<label kind="assignment" x="-486" y="-264">SWSAT := false</label>
+		</transition>
+		<transition>
+			<source ref="id50"/>
+			<target ref="id54"/>
+			<label kind="synchronisation" x="-501" y="-229">ValidSwitch!</label>
+		</transition>
+		<transition>
+			<source ref="id51"/>
+			<target ref="id54"/>
+			<label kind="synchronisation" x="-501" y="-325">ValidSwitch!</label>
+		</transition>
+		<transition>
+			<source ref="id52"/>
+			<target ref="id49"/>
+			<label kind="guard" x="-399" y="-244">LRWCmd</label>
+			<label kind="synchronisation" x="-399" y="-228">RWCmd?</label>
+			<label kind="assignment" x="-442" y="-212">SWSAT := false</label>
+		</transition>
+		<transition>
+			<source ref="id53"/>
+			<target ref="id51"/>
+			<label kind="guard" x="-472" y="-376">tRW == V_RTW</label>
+			<label kind="assignment" x="-472" y="-360">SWSAT := true</label>
+		</transition>
+		<transition>
+			<source ref="id52"/>
+			<target ref="id50"/>
+			<label kind="guard" x="-476" y="-178">tRW == V_WTR</label>
+			<label kind="assignment" x="-476" y="-161">SWSAT := true</label>
+		</transition>
+		<transition>
+			<source ref="id49"/>
+			<target ref="id53"/>
+			<label kind="guard" x="-298" y="-334">CurrType == READ</label>
+			<label kind="assignment" x="-298" y="-318">tRW := 0</label>
+			<nail x="-306" y="-278"/>
+			<nail x="-306" y="-342"/>
+		</transition>
+		<transition>
+			<source ref="id49"/>
+			<target ref="id52"/>
+			<label kind="guard" x="-298" y="-222">CurrType == WRITE</label>
+			<label kind="assignment" x="-298" y="-206">tRW := 0</label>
+			<nail x="-306" y="-246"/>
+			<nail x="-306" y="-182"/>
+		</transition>
+	</template>
+	<template>
+		<name>PREScheduler</name>
+		<parameter>int id</parameter>
+		<declaration>//This template supports tracking the timing constraints from a RD/WR to the precharge,
+//and the ACT command to the precharge on the same bank. Moreover, it captures the precharge period.
+
+clock tRWTP;</declaration>
+		<location id="id55" x="391" y="-136">
+			<name x="375" y="-168">SAT</name>
+		</location>
+		<location id="id56" x="391" y="-76">
+			<label kind="invariant" x="297" y="-110">tRWTP &lt;= V_RP</label>
+		</location>
+		<location id="id57" x="391" y="42">
+			<name x="357" y="17">RAS</name>
+		</location>
+		<location id="id58" x="229" y="-17">
+			<name x="204" y="-42">RWTP</name>
+			<committed/>
+		</location>
+		<location id="id59" x="59" y="-76">
+			<label kind="invariant" x="34" y="-110">tRWTP &lt;= V_RTP</label>
+		</location>
+		<location id="id60" x="59" y="42">
+			<label kind="invariant" x="42" y="51">tRWTP &lt;= V_WTP</label>
+		</location>
+		<location id="id61" x="59" y="-20">
+			<committed/>
+		</location>
+		<location id="id62" x="229" y="-136">
+			<name x="219" y="-166">Idle</name>
+		</location>
+		<init ref="id55"/>
+		<transition>
+			<source ref="id55"/>
+			<target ref="id62"/>
+			<label kind="synchronisation" x="272" y="-153">ValidRP[id]!</label>
+		</transition>
+		<transition>
+			<source ref="id56"/>
+			<target ref="id55"/>
+			<label kind="guard" x="272" y="-126">tRWTP == V_RP</label>
+		</transition>
+		<transition>
+			<source ref="id58"/>
+			<target ref="id56"/>
+			<label kind="guard" x="238" y="-93">RASAT[id]</label>
+			<label kind="assignment" x="238" y="-76">tRWTP := 0,
+RASAT[id] := false</label>
+			<nail x="229" y="-76"/>
+		</transition>
+		<transition>
+			<source ref="id57"/>
+			<target ref="id56"/>
+			<label kind="synchronisation" x="289" y="-34">ValidRAS[id]?</label>
+			<label kind="assignment" x="255" y="-17">RASAT[id] := false,
+tRWTP := 0</label>
+		</transition>
+		<transition>
+			<source ref="id58"/>
+			<target ref="id57"/>
+			<label kind="guard" x="238" y="25">!RASAT[id]</label>
+			<nail x="229" y="42"/>
+		</transition>
+		<transition>
+			<source ref="id59"/>
+			<target ref="id58"/>
+			<label kind="guard" x="75" y="-92">tRWTP == V_RTP</label>
+			<nail x="212" y="-76"/>
+		</transition>
+		<transition>
+			<source ref="id60"/>
+			<target ref="id58"/>
+			<label kind="guard" x="76" y="25">tRWTP == V_WTP</label>
+			<nail x="212" y="42"/>
+		</transition>
+		<transition>
+			<source ref="id61"/>
+			<target ref="id59"/>
+			<label kind="guard" x="67" y="-68">CurrType == READ</label>
+			<label kind="assignment" x="67" y="-52">tRWTP := 0</label>
+		</transition>
+		<transition>
+			<source ref="id61"/>
+			<target ref="id60"/>
+			<label kind="guard" x="67" y="-12">CurrType == WRITE</label>
+			<label kind="assignment" x="67" y="4">tRWTP := 0</label>
+		</transition>
+		<transition>
+			<source ref="id62"/>
+			<target ref="id61"/>
+			<label kind="guard" x="25" y="-170">RWBank == id and
+BCIndex == 0</label>
+			<label kind="synchronisation" x="144" y="-153">RWCmd?</label>
+			<nail x="25" y="-136"/>
+			<nail x="25" y="-17"/>
+		</transition>
+	</template>
+	<template>
+		<name>ObsWCRT</name>
+		<declaration>//This template is the observer of tracking the execution time of consecutive trnasactions.
+//It will be used to verify the bound of the total execution time for the specified number
+//of transaction, which is NMax.
+
+clock WCRT;
+int dataSize := 0;
+int totalCmd := 0;
+bool CmdFinish := false;
+bool start := false;
+
+//The number of interferring transactions as well as the transaction under consideration.
+const int NMax := 1;</declaration>
+		<location id="id63" x="-195" y="-102">
+			<label kind="invariant" x="-297" y="-136">totalCmd &lt;= NMax</label>
+			<committed/>
+		</location>
+		<location id="id64" x="-391" y="-102">
+			<name x="-401" y="-132">Obs</name>
+		</location>
+		<init ref="id64"/>
+		<transition>
+			<source ref="id63"/>
+			<target ref="id64"/>
+			<label kind="guard" x="-348" y="-178">totalCmd &lt; NMax</label>
+			<label kind="assignment" x="-365" y="-161">CmdFinish := false</label>
+			<nail x="-195" y="-161"/>
+			<nail x="-391" y="-161"/>
+		</transition>
+		<transition>
+			<source ref="id63"/>
+			<target ref="id64"/>
+			<label kind="guard" x="-348" y="-42">totalCmd == NMax</label>
+			<label kind="assignment" x="-382" y="-25">WCRT := 0, totalCmd := 0,
+start := true, dataSize := 0,
+CmdFinish := false</label>
+			<nail x="-195" y="-25"/>
+			<nail x="-391" y="-25"/>
+		</transition>
+		<transition>
+			<source ref="id64"/>
+			<target ref="id63"/>
+			<label kind="synchronisation" x="-365" y="-119">CmdEnd?</label>
+			<label kind="assignment" x="-365" y="-102">totalCmd++,
+CmdFinish := true,
+dataSize += CurrSize</label>
+		</transition>
+	</template>
+	<template>
+		<name>ObsWCBW</name>
+		<declaration>//This template is an observer of tracking the time of transferring
+//the given data size DataSize. By verifying its bound, i.e., the maximum
+//time of transferring the DataSize bytes, the worst-case bandwidth can be computed.
+
+clock WCRT;
+int dataSize := 0;
+int totalCmd := 0;
+bool CmdFinish := false;
+bool start := false;
+
+//The given data size that is used to verify its maximum transferring time, which
+//in turn is used to compute the worst-case bandwidth.
+const int DataSize := 2048;</declaration>
+		<location id="id65" x="-8" y="-51">
+			<committed/>
+		</location>
+		<location id="id66" x="-238" y="-51">
+			<name x="-248" y="-85">Obs</name>
+		</location>
+		<init ref="id66"/>
+		<transition>
+			<source ref="id65"/>
+			<target ref="id66"/>
+			<label kind="guard" x="-195" y="-110">dataSize &lt; DataSize</label>
+			<label kind="assignment" x="-195" y="-93">CmdFinish := false</label>
+			<nail x="-25" y="-93"/>
+			<nail x="-213" y="-93"/>
+		</transition>
+		<transition>
+			<source ref="id65"/>
+			<target ref="id66"/>
+			<label kind="guard" x="-195" y="-161">dataSize &gt; DataSize</label>
+			<label kind="assignment" x="-229" y="-144">dataSize := 0, totalCmd := 0,
+CmdFinish := false, WCRT := 0</label>
+			<nail x="-8" y="-144"/>
+			<nail x="-238" y="-144"/>
+		</transition>
+		<transition>
+			<source ref="id65"/>
+			<target ref="id66"/>
+			<label kind="guard" x="-195" y="0">dataSize == DataSize</label>
+			<label kind="assignment" x="-229" y="17">WCRT := 0, start := true,
+totalCmd := 0, dataSize := 0,
+CmdFinish := false</label>
+			<nail x="-8" y="17"/>
+			<nail x="-238" y="17"/>
+		</transition>
+		<transition>
+			<source ref="id66"/>
+			<target ref="id65"/>
+			<label kind="synchronisation" x="-220" y="-68">CmdEnd?</label>
+			<label kind="assignment" x="-220" y="-51">totalCmd++,
+dataSize += CurrSize,
+CmdFinish := true</label>
+		</transition>
+	</template>
+	<system>// Place template instantiations here.
+Src = Source();
+
+ACTScheduler := ActScheduler();
+
+FAW0 = FAW(0);
+FAW1 = FAW(1);
+FAW2 = FAW(2);
+FAW3 = FAW(3);
+
+RRD0 = RRD();
+
+RCD0 := RCD(0);
+RCD1 := RCD(1);
+
+RWScheduler := RwScheduler();
+
+PRE0 := PREScheduler(0);
+PRE1 := PREScheduler(1);
+PRE2 := PREScheduler(2);
+PRE3 := PREScheduler(3);
+PRE4 := PREScheduler(4);
+PRE5 := PREScheduler(5);
+PRE6 := PREScheduler(6);
+PRE7 := PREScheduler(7);
+
+CCD0 := CCD();
+RWCounter := SWCounter();
+
+CMDBUS := CmdBus();
+TDMBUS := TDM();
+MeMAP := MemMap();
+
+//The observer to verify the bound of the WCRT.
+Observer := ObsWCRT();
+
+//The observer to verify the bound of the execution time of the given DataSize,
+//which can be used to compute the WCBW. Enable this instance when needed.
+//Don't forget to declare it under "system".
+//Observer := ObsWCRT();
+
+//List one or more processes to be composed into a system.
+system Src, TDMBUS, MeMAP, ACTScheduler, RWScheduler,
+CMDBUS, RWCounter, RCD0, RCD1,
+PRE0, PRE1, PRE2, PRE3, PRE4, PRE5, PRE6, PRE7,
+FAW0, FAW1, FAW2, FAW3, RRD0, CCD0, Observer;</system>
+	<queries>
+		<query>
+			<formula>A[] (Observer.start == true and Observer.dataSize == Observer.DataSize) imply Observer.WCRT &lt;= 200
+			</formula>
+			<comment>This Observer corresponds to the WCBW observer. The bound of the WCRT is actually the maximum total execution time of transferring DataSize bytes.
+			</comment>
+		</query>
+		<query>
+			<formula>A[] not deadlock
+			</formula>
+			<comment>This query is used to verify that the model has no deadlock.
+			</comment>
+		</query>
+		<query>
+			<formula>A[] (Observer.start == true and CurrType == WRITE) imply Observer.WCRT &lt;= 40
+			</formula>
+			<comment>This query is used to verify the bound of the WCRT for a WRITE transaction. We can manually increase the value (e.g., 40) until the query is satisfied, indicating the bound of WCRT is 40, for instance.
+			</comment>
+		</query>
+		<query>
+			<formula>A[] (Observer.start == true and CurrType == READ) imply Observer.WCRT &lt;= 40
+			</formula>
+			<comment>This query is used to verify the bound of the WCRT for a READ transaction. We can manually increase the value (e.g., 40) until the query is satisfied, indicating the bound of WCRT is 40, for instance.
+			</comment>
+		</query>
+	</queries>
+</nta>
